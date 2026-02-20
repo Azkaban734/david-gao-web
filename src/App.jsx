@@ -16,15 +16,14 @@ import {
   ShieldCheck,
   Info
 } from 'lucide-react';
-const App = () => {
-  // --- Persistent State ---
-  const [listingDetails, setListingDetails] = useState({
+const DEFAULTS = {
+  listingDetails: {
     address: "8 Rean Dr, Toronto, ON M2K 3B9",
     satHours: "Saturday",
     sunHours: "Sunday",
     moveOutDate: "this month"
-  });
-  const [questions, setQuestions] = useState([
+  },
+  questions: [
     {
       id: 'addr',
       title: "What's the address?",
@@ -86,9 +85,25 @@ const App = () => {
         { label: "Will Measure Later", text: "I don't have the exact dimensions with me right now, but I will measure it and get back to you later!" }
       ]
     }
-  ]);
+  ]
+};
+
+const App = () => {
+  const [listingDetails, setListingDetails] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('mkt_listingDetails')) || DEFAULTS.listingDetails; }
+    catch { return DEFAULTS.listingDetails; }
+  });
+  const [questions, setQuestions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('mkt_questions')) || DEFAULTS.questions; }
+    catch { return DEFAULTS.questions; }
+  });
   const [isEditing, setIsEditing] = useState(false);
   const [copyStatus, setCopyStatus] = useState(null);
+
+  // --- Persist to localStorage on change ---
+  useEffect(() => { localStorage.setItem('mkt_listingDetails', JSON.stringify(listingDetails)); }, [listingDetails]);
+  useEffect(() => { localStorage.setItem('mkt_questions', JSON.stringify(questions)); }, [questions]);
+
   // --- Utility: Inject Variables into Text ---
   const processText = (text) => {
     return text
