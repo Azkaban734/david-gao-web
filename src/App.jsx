@@ -150,6 +150,13 @@ const App = () => {
       return q;
     }));
   };
+  const resetToDefaults = () => {
+    if (!window.confirm('Reset everything to defaults? This will overwrite your current settings.')) return;
+    localStorage.removeItem('mkt_listingDetails');
+    localStorage.removeItem('mkt_questions');
+    setListingDetails(DEFAULTS.listingDetails);
+    setQuestions(DEFAULTS.questions);
+  };
   const iconMap = {
     MapPin: (color) => <MapPin className={`w-5 h-5 ${color}`} />,
     Package: (color) => <Package className={`w-5 h-5 ${color}`} />,
@@ -172,6 +179,12 @@ const App = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={resetToDefaults}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full text-sm font-medium text-[#5f6368] border border-[#dadce0] bg-white hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all shadow-sm active:scale-95"
+          >
+            Reset
+          </button>
           <button
             onClick={() => setIsEditing(!isEditing)}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all shadow-sm active:scale-95 ${
