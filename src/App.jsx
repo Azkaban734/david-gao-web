@@ -31,7 +31,7 @@ const DEFAULTS = {
       color: 'text-red-600',
       bgColor: 'bg-red-50',
       answers: [
-        { label: "Full Address", text: "Hi! The address is {address}." }
+        { label: "Full Address", text: "Hi! The address is {address}. You must bring your own truck & movers for large pieces." }
       ]
     },
     {
