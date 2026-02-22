@@ -3,6 +3,10 @@ param(
     [string]$Message = "Update site content"
 )
 
+# Always run from the project root
+$ProjectPath = "D:\Github\david-gao-web\.claude\worktrees\hungry-ellis"
+Set-Location $ProjectPath
+
 # 1. Build deploy folder
 Write-Host "Building..." -ForegroundColor Cyan
 if (Test-Path "deploy") { Remove-Item "deploy" -Recurse -Force }
