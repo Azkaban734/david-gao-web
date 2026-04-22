@@ -16,7 +16,8 @@ Valuation / MOS: 10-year owner-earnings DCF discounted at 9%,
   MOS entry = 30% discount to high intrinsic value estimate.
 
 Note: yfinance provides ~4 years of annual financials.
-      Scores note data availability; 10-year thresholds are aspirational.
+      All historical scoring uses the available 4-year window.
+      The 10-year DCF is a forward projection, not a historical lookback.
       Clear .screener_cache/ after upgrading — new fields added.
 
 Data sources: yfinance (free), iShares ETF holdings (free)
@@ -192,7 +193,7 @@ def _save_cache(sd, cache_dir: str):
 def score_eps_consistency(net_income_history: list,
                            eps_history: list) -> tuple[float, str]:
     """
-    Buffett standard: 10 consecutive years of positive, growing EPS.
+    Positive, growing EPS over the available ~4-year window.
     Uses EPS if available, falls back to net income.
     Weight: 55% consistency (no losses), 45% growth CAGR.
     """
@@ -232,7 +233,7 @@ def score_eps_consistency(net_income_history: list,
 
 def score_return_on_equity(roe_values: list) -> tuple[float, str]:
     """
-    Buffett standard: 10-yr avg ROE >20%, no single year below 15%.
+    Avg ROE >20% over available ~4-year window, no single year below 15%.
     Consistency penalty reduces score proportionally to years below 15%.
     """
     valid = [r for r in roe_values if r is not None and not np.isnan(r)]

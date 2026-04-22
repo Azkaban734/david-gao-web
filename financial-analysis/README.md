@@ -94,5 +94,6 @@ Intrinsic value is calculated via a 10-year owner earnings DCF:
 ## Notes
 
 - Data is sourced from Yahoo Finance via `yfinance` (free, no API key required)
-- ~4 years of annual financials are available; 10-year thresholds are aspirational
+- ~4 years of annual financials are available; all historical scoring uses this window
+- The 10-year DCF is a forward projection of owner earnings, not a historical lookback
 - If you upgrade the screener, clear the cache first: delete the `.screener_cache/` folder
