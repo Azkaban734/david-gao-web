@@ -839,7 +839,8 @@ def margin_of_safety(sd: StockData) -> dict:
             break
 
     bull_g = min(max(growth_rate, 0.0), 0.15)
-    bear_g = bull_g * 0.60  # bear case: 60% of historical growth
+    # Bear: 60% of bull when growth is meaningful; flat/slight decline when near zero
+    bear_g = bull_g * 0.60 if bull_g > 0.01 else max(bull_g - 0.02, -0.02)
 
     intrinsic_high = _owner_earnings_dcf(oe_ps, bull_g)
     intrinsic_low  = _owner_earnings_dcf(oe_ps, bear_g)
