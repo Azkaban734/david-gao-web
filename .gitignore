@@ -26,5 +26,9 @@ dist-ssr
 # Screener cache
 .screener_cache/
 
+# Python
+__pycache__/
+*.pyc
+
 # Claude Code local config
 .claude/

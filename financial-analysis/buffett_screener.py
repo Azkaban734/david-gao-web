@@ -538,6 +538,7 @@ class StockData:
     da_history: list = field(default_factory=list)
     capex_history: list = field(default_factory=list)
     owner_earnings_history: list = field(default_factory=list)
+    last_report_date: str = ""
     error: str = ""
 
 
@@ -590,6 +591,10 @@ def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
                 pass
 
         if inc is not None and not inc.empty:
+            try:
+                sd.last_report_date = str(inc.columns[0].date())
+            except Exception:
+                pass
             sd.net_income_history = _extract_row(
                 inc, ["Net Income", "Net Income Common Stockholders"])
             sd.ebit_history = _extract_row(
