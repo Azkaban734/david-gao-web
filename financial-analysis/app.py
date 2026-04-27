@@ -296,6 +296,16 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    .stAppFooter { display: none !important; }
+    footer { display: none !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Session state defaults
 if "ticker_input" not in st.session_state:
     st.session_state["ticker_input"] = ""
