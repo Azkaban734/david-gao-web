@@ -333,6 +333,10 @@ st.markdown(
     <style>
     .stAppFooter { display: none !important; }
     footer { display: none !important; }
+    footer[data-testid="stAppFooter"] { display: none !important; }
+    .stApp > footer { display: none !important; }
+    section.main > div:has(~ footer) { padding-bottom: 0 !important; }
+    .block-container { padding-bottom: 1rem !important; }
     </style>
     """,
     unsafe_allow_html=True,
