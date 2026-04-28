@@ -439,7 +439,7 @@ if (analyse_clicked or auto_run) and ticker_input:
         staleness = "🟡" if days_ago > 90 else "🟢"
         st.markdown(
             f'<div style="font-size:0.82rem;color:#999;margin:-10px 0 14px 0;">'
-            f'{staleness} &nbsp;Most recent report: <strong>{sd.last_report_date}</strong>'
+            f'{staleness} &nbsp;Most recent quarterly filing: <strong>{sd.last_report_date}</strong>'
             f' &nbsp;({age_str}) &nbsp;— data may not reflect events after this date.'
             f'</div>',
             unsafe_allow_html=True,

@@ -554,6 +554,17 @@ def _extract_row(df: pd.DataFrame, candidates: list) -> list:
     return []
 
 
+def _ttm_row(df: pd.DataFrame, candidates: list, n: int = 4) -> Optional[float]:
+    """Sum a row across the most recent n quarters to produce a TTM figure."""
+    for name in candidates:
+        if name in df.index:
+            vals = [float(df.loc[name, c]) for c in df.columns[:n]
+                    if pd.notna(df.loc[name, c])]
+            if vals:
+                return sum(vals)
+    return None
+
+
 def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
     """Fetch all required fundamental data for a ticker via yfinance."""
     sd = StockData(ticker=ticker)
@@ -699,6 +710,64 @@ def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
         # Final fallback for ROE
         if not sd.roe_values and info.get("returnOnEquity"):
             sd.roe_values = [info["returnOnEquity"]]
+
+        # ── Quarterly TTM: refresh current-state metrics ─────────────────
+        # Annual data drives multi-year trend scoring (EPS consistency, ROE/ROIC history,
+        # capital allocation CAGR).  Quarterly TTM drives current-state metrics:
+        # interest coverage (EBIT/IE), owner earnings base for DCF, and report date.
+        try:
+            q_inc = t.quarterly_income_stmt
+            q_cf  = t.quarterly_cashflow
+            q_bs  = t.quarterly_balance_sheet
+
+            ttm_ni = None  # shared between q_inc and q_cf blocks
+
+            if q_inc is not None and not q_inc.empty and len(q_inc.columns) >= 4:
+                # Most recent quarterly filing date (more timely than annual)
+                try:
+                    sd.last_report_date = str(q_inc.columns[0].date())
+                except Exception:
+                    pass
+
+                ttm_ni   = _ttm_row(q_inc, ["Net Income",
+                                             "Net Income Common Stockholders"])
+                ttm_ebit = _ttm_row(q_inc, ["EBIT", "Operating Income"])
+                ttm_ie   = _ttm_row(q_inc, ["Interest Expense",
+                                             "Net Interest Income"])
+
+                # Prepend TTM values so scoring functions use the most current figures
+                if ttm_ebit is not None:
+                    sd.ebit_history = [ttm_ebit] + (sd.ebit_history or [])
+                if ttm_ie is not None:
+                    sd.interest_expense_history = (
+                        [abs(ttm_ie) if ttm_ie < 0 else ttm_ie]
+                        + (sd.interest_expense_history or [])
+                    )
+
+            if q_cf is not None and not q_cf.empty and len(q_cf.columns) >= 4:
+                ttm_da    = _ttm_row(q_cf, ["Depreciation",
+                                             "Depreciation And Amortization",
+                                             "Depreciation Amortization Depletion"])
+                ttm_capex = _ttm_row(q_cf, ["Capital Expenditure",
+                                             "Capital Expenditures"])
+
+                if ttm_ni is not None and ttm_da is not None:
+                    capex_abs = abs(ttm_capex) if ttm_capex and ttm_capex < 0 else (ttm_capex or 0)
+                    ttm_oe = ttm_ni + ttm_da - capex_abs
+                    sd.owner_earnings_history = [ttm_oe] + (sd.owner_earnings_history or [])
+
+            if q_bs is not None and not q_bs.empty:
+                ld_row = next(
+                    (c for c in ["Long Term Debt",
+                                 "Long Term Debt And Capital Lease Obligation"]
+                     if c in q_bs.index), None)
+                if ld_row:
+                    ld_val = q_bs.loc[ld_row, q_bs.columns[0]]
+                    if pd.notna(ld_val):
+                        sd.long_term_debt = float(ld_val)
+
+        except Exception:
+            pass
 
     except Exception as e:
         sd.error = str(e)[:80]
