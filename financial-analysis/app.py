@@ -392,11 +392,17 @@ analyse_clicked = st.button("Analyse", type="primary")
 
 if (analyse_clicked or auto_run) and ticker_input:
 
-    with st.spinner(f"Fetching fundamentals for {ticker_input}…"):
+    with st.spinner(f"Fetching fundamentals for {ticker_input}… (may retry if rate-limited)"):
         sd = fetch_with_cache(ticker_input, cache_dir=".screener_cache", delay=0.5)
 
     if sd.error:
-        st.error(f"Could not fetch data for **{ticker_input}**: {sd.error}")
+        if any(p in sd.error.lower() for p in ("too many requests", "rate limit", "429")):
+            st.warning(
+                f"Yahoo Finance is rate-limiting requests right now. "
+                f"Wait 60–120 seconds and click **Analyse** again — cached results will be used next time."
+            )
+        else:
+            st.error(f"Could not fetch data for **{ticker_input}**: {sd.error}")
         st.stop()
 
     r       = compute_score(sd)

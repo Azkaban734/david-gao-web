@@ -775,13 +775,33 @@ def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
     return sd
 
 
+_RATE_LIMIT_PHRASES = ("too many requests", "rate limit", "429", "ratelimit")
+
+
+def _is_rate_limited(error: str) -> bool:
+    low = error.lower()
+    return any(p in low for p in _RATE_LIMIT_PHRASES)
+
+
 def fetch_with_cache(ticker: str, cache_dir: Optional[str],
-                     delay: float) -> StockData:
+                     delay: float, retries: int = 4) -> StockData:
     if cache_dir:
         cached = _load_cache(ticker, cache_dir)
         if cached is not None:
             return cached
-    sd = fetch_stock_data(ticker, delay=delay)
+
+    backoff = 20.0
+    sd = StockData(ticker=ticker)
+    for attempt in range(retries):
+        sd = fetch_stock_data(ticker, delay=delay)
+        if not sd.error:
+            break
+        if _is_rate_limited(sd.error) and attempt < retries - 1:
+            time.sleep(backoff)
+            backoff *= 2
+            continue
+        break  # non-rate-limit error or final attempt
+
     if cache_dir and not sd.error:
         _save_cache(sd, cache_dir)
     return sd
