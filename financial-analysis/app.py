@@ -289,6 +289,15 @@ def render_chat_bubbles(parts: list[tuple[str, str]]) -> None:
 
 
 # ─────────────────────────────────────────────
+# TICKER DATA  (6-hour in-process cache shared across all users)
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _cached_fetch(ticker: str):
+    return fetch_with_cache(ticker, cache_dir=None, delay=0.5)
+
+
+# ─────────────────────────────────────────────
 # TOP MOVERS  (Yahoo Finance screener, 5-min cache)
 # ─────────────────────────────────────────────
 
@@ -393,7 +402,7 @@ analyse_clicked = st.button("Analyse", type="primary")
 if (analyse_clicked or auto_run) and ticker_input:
 
     with st.spinner(f"Fetching fundamentals for {ticker_input}… (may retry if rate-limited)"):
-        sd = fetch_with_cache(ticker_input, cache_dir=".screener_cache", delay=0.5)
+        sd = _cached_fetch(ticker_input.upper())
 
     if sd.error:
         if any(p in sd.error.lower() for p in ("too many requests", "rate limit", "429")):
