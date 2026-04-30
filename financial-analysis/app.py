@@ -3,9 +3,14 @@ Would Buffett Buy? — Single-ticker Streamlit app
 Run: streamlit run app.py
 """
 
+import os
 import numpy as np
 import requests
 import streamlit as st
+
+# Bridge Streamlit secrets → environment variable consumed by buffett_screener
+if "FINNHUB_API_KEY" in st.secrets:
+    os.environ["FINNHUB_API_KEY"] = st.secrets["FINNHUB_API_KEY"]
 
 from buffett_screener import fetch_with_cache, compute_score, margin_of_safety
 
@@ -401,15 +406,17 @@ analyse_clicked = st.button("Analyse", type="primary")
 
 if (analyse_clicked or auto_run) and ticker_input:
 
-    with st.spinner(f"Fetching fundamentals for {ticker_input}… (may retry if rate-limited)"):
+    with st.spinner(f"Fetching fundamentals for {ticker_input} via Finnhub…"):
         sd = _cached_fetch(ticker_input.upper())
 
     if sd.error:
         if any(p in sd.error.lower() for p in ("too many requests", "rate limit", "429")):
             st.warning(
-                f"Yahoo Finance is rate-limiting requests right now. "
-                f"Wait 60–120 seconds and click **Analyse** again — cached results will be used next time."
+                "Finnhub rate limit hit (60 calls/min). "
+                "Wait a few seconds and click **Analyse** again."
             )
+        elif "finnhub_api_key" in sd.error.lower() or "not set" in sd.error.lower():
+            st.error("FINNHUB_API_KEY is not configured. Add it to your Streamlit secrets.")
         else:
             st.error(f"Could not fetch data for **{ticker_input}**: {sd.error}")
         st.stop()

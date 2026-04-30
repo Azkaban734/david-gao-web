@@ -15,15 +15,15 @@ Valuation / MOS: 10-year owner-earnings DCF discounted at 9%,
   terminal value at 3% perpetual growth.
   MOS entry = 30% discount to high intrinsic value estimate.
 
-Note: yfinance provides ~4 years of annual financials.
-      All historical scoring uses the available 4-year window.
+Note: Finnhub provides ~5 years of annual financials.
+      All historical scoring uses the available window.
       The 10-year DCF is a forward projection, not a historical lookback.
       Clear .screener_cache/ after upgrading — new fields added.
 
-Data sources: yfinance (free), iShares ETF holdings (free)
+Data sources: Finnhub (free API key), iShares ETF holdings (free)
 
 Usage:
-    pip install yfinance requests pandas numpy tabulate
+    pip install finnhub-python requests pandas numpy tabulate
     python buffett_screener.py
     python buffett_screener.py --universe sp600
     python buffett_screener.py --universe russell2000
@@ -48,9 +48,41 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 
 warnings.filterwarnings("ignore")
+
+# ──────────────────────────────────────────────
+# FINNHUB CLIENT
+# ──────────────────────────────────────────────
+
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+
+def _fh_key() -> str:
+    key = os.environ.get("FINNHUB_API_KEY", "")
+    if not key:
+        raise ValueError(
+            "FINNHUB_API_KEY not set. Get a free key at https://finnhub.io/register"
+        )
+    return key
+
+
+def _fh_get(endpoint: str, params: dict) -> dict:
+    p = dict(params)
+    p["token"] = _fh_key()
+    resp = requests.get(f"{FINNHUB_BASE}{endpoint}", params=p, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
+
+
+def _fh_val(d: dict, *keys):
+    """Return first non-None value from d matching any of the candidate keys."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
 
 # ──────────────────────────────────────────────
 # UNIVERSE SOURCES
@@ -159,9 +191,11 @@ def fetch_universe(universe: str) -> list[str]:
 # ──────────────────────────────────────────────
 
 def _cache_path(ticker: str, cache_dir: str) -> str:
-    day_dir = os.path.join(cache_dir, date.today().isoformat())
-    os.makedirs(day_dir, exist_ok=True)
-    return os.path.join(day_dir, f"{ticker}.json")
+    today = date.today()
+    quarter = f"{today.year}-Q{(today.month - 1) // 3 + 1}"
+    q_dir = os.path.join(cache_dir, quarter)
+    os.makedirs(q_dir, exist_ok=True)
+    return os.path.join(q_dir, f"{ticker}.json")
 
 
 def _load_cache(ticker: str, cache_dir: str):
@@ -211,7 +245,7 @@ def score_eps_consistency(net_income_history: list,
     cagr_str = ""
 
     if len(valid) >= 2:
-        oldest, newest = valid[-1], valid[0]  # yfinance: most recent first
+        oldest, newest = valid[-1], valid[0]  # index 0 = most recent
         if oldest > 0 and newest > 0:
             n = len(valid) - 1
             cagr_pct = ((newest / oldest) ** (1 / n) - 1) * 100
@@ -539,98 +573,156 @@ class StockData:
     capex_history: list = field(default_factory=list)
     owner_earnings_history: list = field(default_factory=list)
     last_report_date: str = ""
+    price: Optional[float] = None
     error: str = ""
 
 
 # ──────────────────────────────────────────────
-# DATA FETCHER
+# DATA FETCHER  (Finnhub — 6 calls per ticker)
 # ──────────────────────────────────────────────
 
-def _extract_row(df: pd.DataFrame, candidates: list) -> list:
-    """Return first matching row from a DataFrame as a list (most-recent first)."""
-    for name in candidates:
-        if name in df.index:
-            return [df.loc[name, c] for c in df.columns if pd.notna(df.loc[name, c])]
-    return []
-
-
-def _ttm_row(df: pd.DataFrame, candidates: list, n: int = 4) -> Optional[float]:
-    """Sum a row across the most recent n quarters to produce a TTM figure."""
-    for name in candidates:
-        if name in df.index:
-            vals = [float(df.loc[name, c]) for c in df.columns[:n]
-                    if pd.notna(df.loc[name, c])]
-            if vals:
-                return sum(vals)
-    return None
-
-
-def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
-    """Fetch all required fundamental data for a ticker via yfinance."""
+def fetch_stock_data(ticker: str, delay: float = 0.0) -> StockData:
+    """Fetch all required fundamental data for a ticker via Finnhub API."""
     sd = StockData(ticker=ticker)
     try:
-        t = yf.Ticker(ticker)
-        time.sleep(delay)
+        if delay:
+            time.sleep(delay)
 
-        info = t.info
-        sd.name               = info.get("longName", ticker)
-        sd.sector             = info.get("sector", "Unknown")
-        sd.industry           = info.get("industry", "Unknown")
-        sd.market_cap         = info.get("marketCap")
-        sd.trailing_pe        = info.get("trailingPE")
-        sd.forward_pe         = info.get("forwardPE")
-        sd.trailing_eps       = info.get("trailingEps")
-        sd.shares_outstanding = (info.get("sharesOutstanding")
-                                  or info.get("impliedSharesOutstanding"))
-        sd.debt_to_equity     = info.get("debtToEquity")
-        sd.total_cash         = info.get("totalCash")
-        sd.total_debt         = info.get("totalDebt")
-        sd.free_cash_flow     = info.get("freeCashflow")
-        sd.gross_margin       = info.get("grossMargins")
-        sd.operating_margin   = info.get("operatingMargins")
-        sd.net_margin         = info.get("profitMargins")
-        sd.current_ratio      = info.get("currentRatio")
+        # ── 1. Company profile ─────────────────────────────────────────
+        profile = _fh_get("/stock/profile2", {"symbol": ticker})
+        if not profile or not profile.get("name"):
+            sd.error = f"Ticker not found: {ticker}"
+            return sd
 
-        # ── Income statement ──
-        inc = None
-        try:
-            inc = t.income_stmt
-        except AttributeError:
-            try:
-                inc = t.financials
-            except Exception:
-                pass
+        sd.name     = profile.get("name", ticker)
+        sd.sector   = profile.get("finnhubIndustry", "Unknown")
+        sd.industry = profile.get("finnhubIndustry", "Unknown")
+        mc = profile.get("marketCapitalization")
+        sd.market_cap = float(mc) * 1_000_000 if mc else None
+        so = profile.get("shareOutstanding")
+        sd.shares_outstanding = float(so) * 1_000_000 if so else None
 
-        if inc is not None and not inc.empty:
-            try:
-                sd.last_report_date = str(inc.columns[0].date())
-            except Exception:
-                pass
-            sd.net_income_history = _extract_row(
-                inc, ["Net Income", "Net Income Common Stockholders"])
-            sd.ebit_history = _extract_row(
-                inc, ["EBIT", "Operating Income"])
-            raw_ie = _extract_row(inc, ["Interest Expense", "Net Interest Income"])
-            sd.interest_expense_history = [abs(v) if v < 0 else v for v in raw_ie]
+        # ── 2. Current price ───────────────────────────────────────────
+        quote    = _fh_get("/quote", {"symbol": ticker})
+        sd.price = quote.get("c") or quote.get("pc")
 
-            # EPS from income statement (preferred over computed)
-            eps_rows = _extract_row(inc, ["Diluted EPS", "Basic EPS"])
-            if eps_rows:
-                sd.eps_history = eps_rows
+        # ── 3. Key metrics (pre-computed TTM ratios) ───────────────────
+        met_resp = _fh_get("/stock/metric", {"symbol": ticker, "metric": "all"})
+        m        = met_resp.get("metric", {})
 
-        # ── Cash flow statement ──
-        try:
-            cf = t.cashflow
-            if cf is not None and not cf.empty:
-                sd.da_history = _extract_row(
-                    cf, ["Depreciation", "Depreciation And Amortization",
-                         "Depreciation Amortization Depletion"])
-                raw_cx = _extract_row(cf, ["Capital Expenditure", "Capital Expenditures"])
-                sd.capex_history = [abs(v) if v < 0 else v for v in raw_cx]
-        except Exception:
-            pass
+        sd.trailing_pe  = m.get("peTTM") or m.get("peNormalizedAnnual")
+        sd.forward_pe   = m.get("peForward")
+        sd.trailing_eps = m.get("epsNormalizedAnnual") or m.get("epsTTM")
 
-        # ── Owner earnings: NI + D&A − CapEx ──
+        def _pct(k1, k2=None):
+            v = m.get(k1) or (m.get(k2) if k2 else None)
+            return v / 100 if v is not None else None
+
+        sd.gross_margin     = _pct("grossMarginTTM",        "grossMarginAnnual")
+        sd.net_margin       = _pct("netProfitMarginTTM",    "netProfitMarginAnnual")
+        sd.operating_margin = _pct("operatingMarginTTM",    "operatingMarginAnnual")
+        sd.current_ratio    = m.get("currentRatioQuarterly") or m.get("currentRatioAnnual")
+        de = m.get("totalDebt/totalEquityAnnual") or m.get("totalDebt/totalEquityQuarterly")
+        sd.debt_to_equity   = de
+
+        roe_metric   = m.get("roeTTM") or m.get("roe5Y")
+        roe_fallback = [roe_metric / 100] if roe_metric is not None else []
+
+        # ── 4. Annual income statement ─────────────────────────────────
+        ic_resp = _fh_get("/stock/financials",
+                          {"symbol": ticker, "statement": "ic", "freq": "annual"})
+        ann_ic = ic_resp.get("data", [])[:5]  # most-recent first
+
+        tax_rate = 0.21
+        if ann_ic:
+            sd.last_report_date = ann_ic[0].get("period", "")
+
+            sd.net_income_history = [
+                d["netIncome"] for d in ann_ic if d.get("netIncome") is not None
+            ]
+            sd.ebit_history = [
+                _fh_val(d, "operatingIncome", "ebit")
+                for d in ann_ic
+                if _fh_val(d, "operatingIncome", "ebit") is not None
+            ]
+            sd.interest_expense_history = [
+                abs(d["interestExpense"])
+                for d in ann_ic
+                if d.get("interestExpense") is not None
+            ]
+            sd.eps_history = [
+                _fh_val(d, "eps", "epsBasic")
+                for d in ann_ic
+                if _fh_val(d, "eps", "epsBasic") is not None
+            ]
+
+            pt = ann_ic[0].get("pretaxIncome")
+            tp = ann_ic[0].get("taxProvision")
+            if pt and tp and pt > 0:
+                tax_rate = max(0.10, min(0.40, tp / pt))
+
+        # ── 5. Annual balance sheet (ROE, ROIC, debt) ─────────────────
+        bs_resp = _fh_get("/stock/financials",
+                          {"symbol": ticker, "statement": "bs", "freq": "annual"})
+        ann_bs = bs_resp.get("data", [])[:5]
+
+        if ann_bs:
+            lb = ann_bs[0]
+            sd.total_cash     = _fh_val(lb, "cashAndEquivalents", "cash",
+                                        "cashAndShortTermInvestments")
+            sd.total_debt     = _fh_val(lb, "totalDebt")
+            sd.long_term_debt = _fh_val(lb, "longTermDebt",
+                                        "longTermDebtAndCapitalLeaseObligation")
+
+            if not sd.current_ratio:
+                sd.current_ratio = lb.get("currentRatio")
+
+            if sd.net_income_history:
+                roes = []
+                for i, bs_yr in enumerate(ann_bs):
+                    if i >= len(sd.net_income_history):
+                        break
+                    eq = _fh_val(bs_yr, "totalEquity", "equity", "stockholdersEquity")
+                    ni = sd.net_income_history[i]
+                    if eq and eq > 0 and ni:
+                        roes.append(ni / eq)
+                sd.roe_values = roes or roe_fallback
+
+            if sd.ebit_history:
+                roics = []
+                for i, bs_yr in enumerate(ann_bs):
+                    if i >= len(sd.ebit_history):
+                        break
+                    eq   = _fh_val(bs_yr, "totalEquity", "equity", "stockholdersEquity")
+                    debt = _fh_val(bs_yr, "totalDebt", "longTermDebt") or 0
+                    ebit = sd.ebit_history[i]
+                    if eq and eq > 0 and ebit:
+                        nopat = ebit * (1 - tax_rate)
+                        ic    = eq + debt
+                        if ic > 0:
+                            roics.append(nopat / ic)
+                sd.roic_values = roics
+
+        if not sd.roe_values:
+            sd.roe_values = roe_fallback
+
+        # ── 6. Annual cash flow (D&A, CapEx, owner earnings) ──────────
+        cf_resp = _fh_get("/stock/financials",
+                          {"symbol": ticker, "statement": "cf", "freq": "annual"})
+        ann_cf = cf_resp.get("data", [])[:5]
+
+        if ann_cf:
+            sd.da_history = [
+                abs(_fh_val(d, "depreciationAmortization", "depreciation"))
+                for d in ann_cf
+                if _fh_val(d, "depreciationAmortization", "depreciation") is not None
+            ]
+            sd.capex_history = [
+                abs(_fh_val(d, "capitalExpenditures", "capex"))
+                for d in ann_cf
+                if _fh_val(d, "capitalExpenditures", "capex") is not None
+            ]
+
         if sd.net_income_history and sd.da_history:
             if sd.capex_history:
                 n = min(len(sd.net_income_history), len(sd.da_history), len(sd.capex_history))
@@ -645,7 +737,7 @@ def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
                     for i in range(n)
                 ]
 
-        # ── EPS fallback: compute from NI / shares ──
+        # ── EPS fallback ───────────────────────────────────────────────
         if not sd.eps_history:
             if sd.net_income_history and sd.shares_outstanding:
                 sd.eps_history = [ni / sd.shares_outstanding
@@ -653,124 +745,8 @@ def fetch_stock_data(ticker: str, delay: float = 0.5) -> StockData:
             elif sd.trailing_eps:
                 sd.eps_history = [sd.trailing_eps]
 
-        # ── Balance sheet: ROE, ROIC, long-term debt ──
-        try:
-            bs = t.balance_sheet
-            if bs is not None and not bs.empty:
-                eq_row = next(
-                    (c for c in ["Stockholders Equity", "Total Stockholder Equity",
-                                 "Common Stock Equity"] if c in bs.index), None)
-                debt_row = next(
-                    (c for c in ["Total Debt", "Long Term Debt",
-                                 "Long Term Debt And Capital Lease Obligation"]
-                     if c in bs.index), None)
-
-                if debt_row:
-                    ld = bs.loc[debt_row, bs.columns[0]]
-                    if pd.notna(ld):
-                        sd.long_term_debt = float(ld)
-
-                if eq_row and sd.net_income_history:
-                    roes = []
-                    for i, col in enumerate(bs.columns):
-                        if i < len(sd.net_income_history):
-                            eq = bs.loc[eq_row, col]
-                            ni = sd.net_income_history[i]
-                            if pd.notna(eq) and eq > 0 and ni:
-                                roes.append(ni / eq)
-                    sd.roe_values = roes if roes else (
-                        [info["returnOnEquity"]] if info.get("returnOnEquity") else [])
-
-                if eq_row and sd.ebit_history:
-                    # Estimate tax rate from income statement
-                    tax_rate = 0.21
-                    if inc is not None and not inc.empty:
-                        tax_vals = _extract_row(inc, ["Tax Provision", "Income Tax Expense"])
-                        pretax_vals = _extract_row(inc, ["Pretax Income", "Income Before Tax"])
-                        if tax_vals and pretax_vals and pretax_vals[0] and pretax_vals[0] > 0:
-                            tax_rate = max(0.10, min(0.40, tax_vals[0] / pretax_vals[0]))
-
-                    roics = []
-                    for i, col in enumerate(bs.columns):
-                        if i < len(sd.ebit_history):
-                            eq = bs.loc[eq_row, col] if pd.notna(bs.loc[eq_row, col]) else None
-                            debt = (bs.loc[debt_row, col]
-                                    if debt_row and pd.notna(bs.loc[debt_row, col]) else 0)
-                            ebit = sd.ebit_history[i]
-                            if eq and eq > 0 and ebit:
-                                nopat = ebit * (1 - tax_rate)
-                                ic = eq + (debt or 0)
-                                if ic > 0:
-                                    roics.append(nopat / ic)
-                    sd.roic_values = roics
-
-        except Exception:
-            pass
-
-        # Final fallback for ROE
-        if not sd.roe_values and info.get("returnOnEquity"):
-            sd.roe_values = [info["returnOnEquity"]]
-
-        # ── Quarterly TTM: refresh current-state metrics ─────────────────
-        # Annual data drives multi-year trend scoring (EPS consistency, ROE/ROIC history,
-        # capital allocation CAGR).  Quarterly TTM drives current-state metrics:
-        # interest coverage (EBIT/IE), owner earnings base for DCF, and report date.
-        try:
-            q_inc = t.quarterly_income_stmt
-            q_cf  = t.quarterly_cashflow
-            q_bs  = t.quarterly_balance_sheet
-
-            ttm_ni = None  # shared between q_inc and q_cf blocks
-
-            if q_inc is not None and not q_inc.empty and len(q_inc.columns) >= 4:
-                # Most recent quarterly filing date (more timely than annual)
-                try:
-                    sd.last_report_date = str(q_inc.columns[0].date())
-                except Exception:
-                    pass
-
-                ttm_ni   = _ttm_row(q_inc, ["Net Income",
-                                             "Net Income Common Stockholders"])
-                ttm_ebit = _ttm_row(q_inc, ["EBIT", "Operating Income"])
-                ttm_ie   = _ttm_row(q_inc, ["Interest Expense",
-                                             "Net Interest Income"])
-
-                # Prepend TTM values so scoring functions use the most current figures
-                if ttm_ebit is not None:
-                    sd.ebit_history = [ttm_ebit] + (sd.ebit_history or [])
-                if ttm_ie is not None:
-                    sd.interest_expense_history = (
-                        [abs(ttm_ie) if ttm_ie < 0 else ttm_ie]
-                        + (sd.interest_expense_history or [])
-                    )
-
-            if q_cf is not None and not q_cf.empty and len(q_cf.columns) >= 4:
-                ttm_da    = _ttm_row(q_cf, ["Depreciation",
-                                             "Depreciation And Amortization",
-                                             "Depreciation Amortization Depletion"])
-                ttm_capex = _ttm_row(q_cf, ["Capital Expenditure",
-                                             "Capital Expenditures"])
-
-                if ttm_ni is not None and ttm_da is not None:
-                    capex_abs = abs(ttm_capex) if ttm_capex and ttm_capex < 0 else (ttm_capex or 0)
-                    ttm_oe = ttm_ni + ttm_da - capex_abs
-                    sd.owner_earnings_history = [ttm_oe] + (sd.owner_earnings_history or [])
-
-            if q_bs is not None and not q_bs.empty:
-                ld_row = next(
-                    (c for c in ["Long Term Debt",
-                                 "Long Term Debt And Capital Lease Obligation"]
-                     if c in q_bs.index), None)
-                if ld_row:
-                    ld_val = q_bs.loc[ld_row, q_bs.columns[0]]
-                    if pd.notna(ld_val):
-                        sd.long_term_debt = float(ld_val)
-
-        except Exception:
-            pass
-
     except Exception as e:
-        sd.error = str(e)[:80]
+        sd.error = str(e)[:120]
 
     return sd
 
@@ -788,6 +764,14 @@ def fetch_with_cache(ticker: str, cache_dir: Optional[str],
     if cache_dir:
         cached = _load_cache(ticker, cache_dir)
         if cached is not None:
+            # Fundamentals are cached for the quarter; refresh price only (1 call)
+            try:
+                quote = _fh_get("/quote", {"symbol": ticker})
+                p = quote.get("c") or quote.get("pc")
+                if p:
+                    cached.price = float(p)
+            except Exception:
+                pass
             return cached
 
     backoff = 20.0
@@ -800,7 +784,7 @@ def fetch_with_cache(ticker: str, cache_dir: Optional[str],
             time.sleep(backoff)
             backoff *= 2
             continue
-        break  # non-rate-limit error or final attempt
+        break
 
     if cache_dir and not sd.error:
         _save_cache(sd, cache_dir)
@@ -904,7 +888,13 @@ def margin_of_safety(sd: StockData) -> dict:
     }
 
     try:
-        price = float(yf.Ticker(sd.ticker).history(period="1d")["Close"].iloc[-1])
+        if sd.price and sd.price > 0:
+            price = float(sd.price)
+        else:
+            quote = _fh_get("/quote", {"symbol": sd.ticker})
+            price = float(quote.get("c") or quote.get("pc") or 0)
+        if not price:
+            raise ValueError("No price")
     except Exception:
         return {**empty, "MOS Status": "Price unavailable"}
     empty["Price"] = round(price, 2)
