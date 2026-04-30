@@ -76,12 +76,21 @@ def _fh_get(endpoint: str, params: dict) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _fh_val(d: dict, *keys):
-    """Return first non-None value from d matching any of the candidate keys."""
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            return v
+def _xbrl_val(items: list, *concepts) -> Optional[float]:
+    """Extract a value from a Finnhub /financials-reported XBRL list by concept name."""
+    seen: dict = {}
+    for item in items:
+        c = item.get("concept")
+        if c and c not in seen:
+            v = item.get("value")
+            if v is not None:
+                try:
+                    seen[c] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    for c in concepts:
+        if c in seen:
+            return seen[c]
     return None
 
 # ──────────────────────────────────────────────
@@ -578,11 +587,13 @@ class StockData:
 
 
 # ──────────────────────────────────────────────
-# DATA FETCHER  (Finnhub — 6 calls per ticker)
+# DATA FETCHER  (Finnhub — 4 calls per ticker)
+# Calls: /stock/profile2, /quote, /stock/metric,
+#        /financials-reported (income + balance + cashflow in one)
 # ──────────────────────────────────────────────
 
 def fetch_stock_data(ticker: str, delay: float = 0.0) -> StockData:
-    """Fetch all required fundamental data for a ticker via Finnhub API."""
+    """Fetch all required fundamental data for a ticker via Finnhub free API."""
     sd = StockData(ticker=ticker)
     try:
         if delay:
@@ -606,7 +617,7 @@ def fetch_stock_data(ticker: str, delay: float = 0.0) -> StockData:
         quote    = _fh_get("/quote", {"symbol": ticker})
         sd.price = quote.get("c") or quote.get("pc")
 
-        # ── 3. Key metrics (pre-computed TTM ratios) ───────────────────
+        # ── 3. Key metrics (pre-computed TTM ratios, all free) ─────────
         met_resp = _fh_get("/stock/metric", {"symbol": ticker, "metric": "all"})
         m        = met_resp.get("metric", {})
 
@@ -618,114 +629,115 @@ def fetch_stock_data(ticker: str, delay: float = 0.0) -> StockData:
             v = m.get(k1) or (m.get(k2) if k2 else None)
             return v / 100 if v is not None else None
 
-        sd.gross_margin     = _pct("grossMarginTTM",        "grossMarginAnnual")
-        sd.net_margin       = _pct("netProfitMarginTTM",    "netProfitMarginAnnual")
-        sd.operating_margin = _pct("operatingMarginTTM",    "operatingMarginAnnual")
+        sd.gross_margin     = _pct("grossMarginTTM",     "grossMarginAnnual")
+        sd.net_margin       = _pct("netProfitMarginTTM", "netProfitMarginAnnual")
+        sd.operating_margin = _pct("operatingMarginTTM", "operatingMarginAnnual")
         sd.current_ratio    = m.get("currentRatioQuarterly") or m.get("currentRatioAnnual")
         de = m.get("totalDebt/totalEquityAnnual") or m.get("totalDebt/totalEquityQuarterly")
         sd.debt_to_equity   = de
 
-        roe_metric   = m.get("roeTTM") or m.get("roe5Y")
-        roe_fallback = [roe_metric / 100] if roe_metric is not None else []
+        roe_metric    = m.get("roeTTM") or m.get("roe5Y")
+        roe_fallback  = [roe_metric / 100] if roe_metric is not None else []
+        roic_metric   = m.get("roicAnnual") or m.get("roic5Y")
+        roic_fallback = [roic_metric / 100] if roic_metric is not None else []
 
-        # ── 4. Annual income statement ─────────────────────────────────
-        ic_resp = _fh_get("/stock/financials",
-                          {"symbol": ticker, "statement": "ic", "freq": "annual"})
-        ann_ic = ic_resp.get("data", [])[:5]  # most-recent first
+        # ── 4. Financial statements (income + balance + cashflow) ──────
+        # /financials-reported returns SEC XBRL data for all 3 statement
+        # types in a single call and is available on Finnhub's free tier.
+        fin_resp = _fh_get("/financials-reported",
+                           {"symbol": ticker, "freq": "annual"})
+        # quarter=0 means annual (10-K); sort most-recent first
+        annual = sorted(
+            [r for r in fin_resp.get("data", []) if r.get("quarter", 0) == 0],
+            key=lambda r: r.get("endDate", ""),
+            reverse=True,
+        )[:5]
 
         tax_rate = 0.21
-        if ann_ic:
-            sd.last_report_date = ann_ic[0].get("period", "")
+        for yr in annual:
+            if not sd.last_report_date:
+                sd.last_report_date = yr.get("endDate", "")
+            ic  = yr["report"].get("ic", [])
+            bs  = yr["report"].get("bs", [])
+            cf  = yr["report"].get("cf", [])
 
-            sd.net_income_history = [
-                d["netIncome"] for d in ann_ic if d.get("netIncome") is not None
-            ]
-            sd.ebit_history = [
-                _fh_val(d, "operatingIncome", "ebit")
-                for d in ann_ic
-                if _fh_val(d, "operatingIncome", "ebit") is not None
-            ]
-            sd.interest_expense_history = [
-                abs(d["interestExpense"])
-                for d in ann_ic
-                if d.get("interestExpense") is not None
-            ]
-            sd.eps_history = [
-                _fh_val(d, "eps", "epsBasic")
-                for d in ann_ic
-                if _fh_val(d, "eps", "epsBasic") is not None
-            ]
+            # Income statement items
+            ni   = _xbrl_val(ic, "NetIncomeLoss", "NetIncome",
+                               "NetIncomeLossAttributableToParent", "ProfitLoss")
+            ebit = _xbrl_val(ic, "OperatingIncomeLoss", "OperatingIncome")
+            ie   = _xbrl_val(ic, "InterestExpense", "InterestAndDebtExpense",
+                               "InterestExpenseDebt")
+            eps  = _xbrl_val(ic, "EarningsPerShareDiluted", "EarningsPerShareBasic")
+            pt   = _xbrl_val(ic,
+                               "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+                               "ExtraordinaryItemsNoncontrollingInterest",
+                               "IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+                               "IncomeLossBeforeIncomeTaxes")
+            tp   = _xbrl_val(ic, "IncomeTaxExpenseBenefit")
 
-            pt = ann_ic[0].get("pretaxIncome")
-            tp = ann_ic[0].get("taxProvision")
-            if pt and tp and pt > 0:
-                tax_rate = max(0.10, min(0.40, tp / pt))
+            # Balance sheet items
+            eq   = _xbrl_val(bs, "StockholdersEquity",
+                               "StockholdersEquityAttributableToParent",
+                               "CommonStockholdersEquity")
+            ltd  = _xbrl_val(bs, "LongTermDebt", "LongTermDebtNoncurrent",
+                               "LongTermDebtAndCapitalLeaseObligations")
+            stb  = _xbrl_val(bs, "ShortTermBorrowings",
+                               "ShortTermDebt", "NotesPayableCurrent")
+            cash = _xbrl_val(bs, "CashAndCashEquivalentsAtCarryingValue",
+                               "CashCashEquivalentsAndShortTermInvestments", "Cash")
+            ca   = _xbrl_val(bs, "AssetsCurrent")
+            cl   = _xbrl_val(bs, "LiabilitiesCurrent")
 
-        # ── 5. Annual balance sheet (ROE, ROIC, debt) ─────────────────
-        bs_resp = _fh_get("/stock/financials",
-                          {"symbol": ticker, "statement": "bs", "freq": "annual"})
-        ann_bs = bs_resp.get("data", [])[:5]
+            # Cash flow items
+            da    = _xbrl_val(cf, "DepreciationDepletionAndAmortization",
+                               "DepreciationAndAmortization", "Depreciation")
+            capex = _xbrl_val(cf, "PaymentsToAcquirePropertyPlantAndEquipment",
+                               "PaymentsForCapitalImprovements",
+                               "CapitalExpendituresIncurredButNotYetPaid")
 
-        if ann_bs:
-            lb = ann_bs[0]
-            sd.total_cash     = _fh_val(lb, "cashAndEquivalents", "cash",
-                                        "cashAndShortTermInvestments")
-            sd.total_debt     = _fh_val(lb, "totalDebt")
-            sd.long_term_debt = _fh_val(lb, "longTermDebt",
-                                        "longTermDebtAndCapitalLeaseObligation")
+            # Build historical arrays (most-recent first)
+            if ni    is not None: sd.net_income_history.append(ni)
+            if ebit  is not None: sd.ebit_history.append(ebit)
+            if ie    is not None: sd.interest_expense_history.append(abs(ie))
+            if eps   is not None: sd.eps_history.append(eps)
+            if da    is not None: sd.da_history.append(abs(da))
+            if capex is not None: sd.capex_history.append(abs(capex))
 
-            if not sd.current_ratio:
-                sd.current_ratio = lb.get("currentRatio")
+            # ROE: NI / equity
+            if eq and eq > 0 and ni:
+                sd.roe_values.append(ni / eq)
 
-            if sd.net_income_history:
-                roes = []
-                for i, bs_yr in enumerate(ann_bs):
-                    if i >= len(sd.net_income_history):
-                        break
-                    eq = _fh_val(bs_yr, "totalEquity", "equity", "stockholdersEquity")
-                    ni = sd.net_income_history[i]
-                    if eq and eq > 0 and ni:
-                        roes.append(ni / eq)
-                sd.roe_values = roes or roe_fallback
+            # ROIC: NOPAT / (equity + debt)
+            if eq and eq > 0 and ebit:
+                if pt and tp and pt > 0:
+                    tax_rate = max(0.10, min(0.40, tp / pt))
+                total_debt = (ltd or 0) + (stb or 0)
+                nopat = ebit * (1 - tax_rate)
+                ic_total = eq + total_debt
+                if ic_total > 0:
+                    sd.roic_values.append(nopat / ic_total)
 
-            if sd.ebit_history:
-                roics = []
-                for i, bs_yr in enumerate(ann_bs):
-                    if i >= len(sd.ebit_history):
-                        break
-                    eq   = _fh_val(bs_yr, "totalEquity", "equity", "stockholdersEquity")
-                    debt = _fh_val(bs_yr, "totalDebt", "longTermDebt") or 0
-                    ebit = sd.ebit_history[i]
-                    if eq and eq > 0 and ebit:
-                        nopat = ebit * (1 - tax_rate)
-                        ic    = eq + debt
-                        if ic > 0:
-                            roics.append(nopat / ic)
-                sd.roic_values = roics
+            # Balance sheet snapshot (use latest year only)
+            if sd.long_term_debt is None and ltd is not None:
+                sd.long_term_debt = ltd
+            if sd.total_cash is None and cash is not None:
+                sd.total_cash = cash
+            if sd.total_debt is None and (ltd is not None or stb is not None):
+                sd.total_debt = (ltd or 0) + (stb or 0)
+            if sd.current_ratio is None and ca and cl and cl > 0:
+                sd.current_ratio = ca / cl
 
+        # Metric fallbacks when XBRL data is sparse
         if not sd.roe_values:
             sd.roe_values = roe_fallback
+        if not sd.roic_values:
+            sd.roic_values = roic_fallback
 
-        # ── 6. Annual cash flow (D&A, CapEx, owner earnings) ──────────
-        cf_resp = _fh_get("/stock/financials",
-                          {"symbol": ticker, "statement": "cf", "freq": "annual"})
-        ann_cf = cf_resp.get("data", [])[:5]
-
-        if ann_cf:
-            sd.da_history = [
-                abs(_fh_val(d, "depreciationAmortization", "depreciation"))
-                for d in ann_cf
-                if _fh_val(d, "depreciationAmortization", "depreciation") is not None
-            ]
-            sd.capex_history = [
-                abs(_fh_val(d, "capitalExpenditures", "capex"))
-                for d in ann_cf
-                if _fh_val(d, "capitalExpenditures", "capex") is not None
-            ]
-
+        # ── Owner earnings: NI + D&A − CapEx ──────────────────────────
         if sd.net_income_history and sd.da_history:
             if sd.capex_history:
-                n = min(len(sd.net_income_history), len(sd.da_history), len(sd.capex_history))
+                n = min(len(sd.net_income_history), len(sd.da_history),
+                        len(sd.capex_history))
                 sd.owner_earnings_history = [
                     sd.net_income_history[i] + sd.da_history[i] - sd.capex_history[i]
                     for i in range(n)
